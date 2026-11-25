@@ -25,10 +25,7 @@ npm.cmd ci --prefix apps/web
 
 ### Option B: AWS (uses Free plan credits)
 
-> [!NOTE]
-> This currently creates the infrastructure only. Deploying the app to it arrives with Slice 3.
-
-Expect roughly $0.20–0.25 of credits per hour from the moment `make tf-apply` starts until
+Expect roughly $0.23–0.28 of credits per hour from the moment `make tf-apply` starts until
 `make tf-destroy` finishes. Allow about 30 minutes to start and 20–30 to shut down. Never upgrade
 the plan or activate "advanced features": neither can be reversed, and the Free plan is what
 prevents real charges.
@@ -71,6 +68,16 @@ make tf-init
    kubectl get nodes
    ```
 
+5. Deploy the app. This needs a commit that CI has published from `main`, and Docker running. The
+   first time, let `gh` read private packages with `gh auth refresh -s read:packages`.
+
+   ```powershell
+   make deploy                  # latest origin/main; or: make deploy TAG=<full commit sha>
+   ```
+
+   It prints the dashboard's URL. Only the addresses in `api_allowed_cidrs` can open it. It is plain
+   HTTP, because TLS needs a domain.
+
 #### Shut down
 
 Do this after every demo. Stopping pods is not enough: the cluster, NAT gateway, nodes and database
@@ -87,6 +94,10 @@ use credits until they are destroyed. **All data and pushed images are deleted.*
    If it refuses because of the `kubectl` context, run the command it prints and try again. If your
    IP has changed since start-up, update `terraform.tfvars` and run `make tf-plan` and `make tf-apply`
    first so that `kubectl` can reach the cluster.
+
+   If it stops while deleting the load balancer, fix that first: removing the cluster would leave
+   the load balancer behind and block deleting the VPC. If the app was never deployed, you can skip
+   that step with `terraform -chdir=infra/terraform destroy`.
 
 2. Confirm nothing that uses credits is left. Each command should print `[]`:
 

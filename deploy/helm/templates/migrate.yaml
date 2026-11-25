@@ -1,0 +1,48 @@
+{{- $ctx := dict "root" . "component" "migrate" -}}
+# Runs before anything else changes, so a failed migration leaves the old version serving.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-migrate
+  labels:
+    {{- include "pq.labels" $ctx | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-1"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+automountServiceAccountToken: false
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-migrate
+  labels:
+    {{- include "pq.labels" $ctx | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 180
+  template:
+    metadata:
+      labels:
+        {{- include "pq.labels" $ctx | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ .Release.Name }}-migrate
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "pq.podSecurity" 10001 | nindent 8 }}
+      containers:
+        - name: migrate
+          {{- include "pq.image" (dict "root" . "name" "api") | nindent 10 }}
+          command: ["python", "-m", "app.migrate"]
+          env:
+            {{- include "pq.databaseEnv" . | nindent 12 }}
+          securityContext:
+            {{- include "pq.containerSecurity" . | nindent 12 }}
+          resources:
+            requests: { cpu: 50m, memory: 96Mi }
+            limits: { memory: 192Mi }

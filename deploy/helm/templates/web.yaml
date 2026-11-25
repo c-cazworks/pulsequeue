@@ -1,0 +1,71 @@
+{{- $ctx := dict "root" . "component" "web" "hpa" .Values.web.autoscaling -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-web
+  labels:
+    {{- include "pq.labels" $ctx | nindent 4 }}
+spec:
+  # replicas is owned by the HPA
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels:
+      {{- include "pq.selector" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "pq.labels" $ctx | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        {{- include "pq.podSecurity" 101 | nindent 8 }}
+      {{- include "pq.spread" $ctx | nindent 6 }}
+      containers:
+        - name: web
+          {{- include "pq.image" (dict "root" . "name" "web") | nindent 10 }}
+          env:
+            # nginx's resolver ignores search domains, so this must be fully qualified.
+            - name: API_UPSTREAM
+              value: {{ .Release.Name }}-api.{{ .Release.Namespace }}.svc.cluster.local:8000
+          ports:
+            - { name: http, containerPort: 8080 }
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+          lifecycle:
+            preStop:
+              sleep: { seconds: 20 } # keep serving while the ALB deregisters this pod
+          securityContext:
+            {{- include "pq.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+          volumeMounts:
+            - { name: conf, mountPath: /etc/nginx/conf.d } # rendered from the template at start
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: conf
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-web
+  labels:
+    {{- include "pq.labels" $ctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "pq.selector" $ctx | nindent 4 }}
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+{{ include "pq.hpa" $ctx }}
+---
+{{ include "pq.pdb" $ctx }}

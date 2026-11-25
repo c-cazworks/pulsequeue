@@ -1,0 +1,8 @@
+# Throwaway kind cluster: locally built images and the Postgres from deploy/kind/postgres.yaml.
+image:
+  registry: local
+  pullPolicy: Never
+
+database:
+  host: postgres
+  existingSecret: postgres

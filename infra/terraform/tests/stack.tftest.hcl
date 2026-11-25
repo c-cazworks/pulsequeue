@@ -12,6 +12,10 @@ mock_provider "aws" {
     defaults = { arn = "arn:aws:iam::123456789012:role/mock" }
   }
 
+  mock_resource "aws_iam_policy" {
+    defaults = { arn = "arn:aws:iam::123456789012:policy/mock" }
+  }
+
   mock_resource "aws_launch_template" {
     defaults = { id = "lt-0123456789abcdef0", latest_version = 1 }
   }
@@ -36,6 +40,32 @@ run "stack" {
   assert {
     condition     = toset(keys(module.ecr.repository_urls)) == toset(["pulsequeue/api", "pulsequeue/web"])
     error_message = "Expected one ECR repository per image."
+  }
+}
+
+run "app_can_read_only_the_database_secret" {
+  assert {
+    condition = (
+      length(jsondecode(aws_iam_policy.app.policy).Statement) == 1 &&
+      jsondecode(aws_iam_policy.app.policy).Statement[0].Action == "secretsmanager:GetSecretValue" &&
+      jsondecode(aws_iam_policy.app.policy).Statement[0].Resource == module.rds.secret_arn
+    )
+    error_message = "The app role must read one secret and nothing else."
+  }
+
+  assert {
+    condition = (
+      toset([for a in aws_eks_pod_identity_association.app : "${a.namespace}/${a.service_account}"]) ==
+      toset(["pulsequeue/pulsequeue", "pulsequeue/pulsequeue-migrate"])
+    )
+    error_message = "Only the app and its migration may use the app role."
+  }
+}
+
+run "load_balancer_controller_policy_fits_iam_limit" {
+  assert {
+    condition     = length(jsonencode(jsondecode(aws_iam_policy.load_balancer_controller.policy))) <= 6144
+    error_message = "IAM managed policies are limited to 6144 characters."
   }
 }
 

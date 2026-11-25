@@ -1,0 +1,52 @@
+{{- $ctx := dict "root" . "component" "worker" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-worker
+  labels:
+    {{- include "pq.labels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  strategy:
+    rollingUpdate: { maxUnavailable: 1, maxSurge: 0 } # fine for a queue; saves a pod slot
+  selector:
+    matchLabels:
+      {{- include "pq.selector" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "pq.labels" $ctx | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30 # 20s in-flight event + 5s pool close
+      securityContext:
+        {{- include "pq.podSecurity" 10001 | nindent 8 }}
+      {{- include "pq.spread" $ctx | nindent 6 }}
+      containers:
+        - name: worker
+          {{- include "pq.image" (dict "root" . "name" "api") | nindent 10 }}
+          command: ["python", "-m", "app.worker"]
+          env:
+            {{- include "pq.databaseEnv" . | nindent 12 }}
+          # No readiness probe: nothing sends it traffic.
+          startupProbe:
+            exec: { command: ["python", "-m", "app.heartbeat"] }
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            exec: { command: ["python", "-m", "app.heartbeat"] }
+            periodSeconds: 20
+            timeoutSeconds: 5
+          securityContext:
+            {{- include "pq.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp } # heartbeat file
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+{{ include "pq.pdb" $ctx }}

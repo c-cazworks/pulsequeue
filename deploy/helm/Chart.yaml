@@ -1,0 +1,5 @@
+apiVersion: v2
+name: pulsequeue
+description: PulseQueue API, worker and web dashboard
+type: application
+version: 0.1.0

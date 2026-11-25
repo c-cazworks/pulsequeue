@@ -21,3 +21,16 @@ output "db_secret_arn" {
 output "vpc_id" {
   value = module.vpc.vpc_id
 }
+
+output "region" {
+  value = var.region
+}
+
+output "allowed_cidrs" {
+  description = "Also limits who can reach the load balancer."
+  value       = var.api_allowed_cidrs
+}
+
+output "ecr_registry" {
+  value = split("/", module.ecr.repository_urls["${var.name}/api"])[0]
+}

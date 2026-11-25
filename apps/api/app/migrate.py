@@ -4,6 +4,8 @@ from pathlib import Path
 
 import asyncpg
 
+from app.db import password_source
+
 logger = logging.getLogger(__name__)
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 LOCK_KEY = 7_301_001  # arbitrary; serializes concurrent migrators
@@ -17,7 +19,7 @@ async def apply_schema(conn: asyncpg.Connection) -> None:
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    conn = await asyncpg.connect(timeout=10, command_timeout=60)
+    conn = await asyncpg.connect(timeout=10, command_timeout=60, password=password_source())
     try:
         await apply_schema(conn)
     finally:
