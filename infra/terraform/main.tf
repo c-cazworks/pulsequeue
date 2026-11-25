@@ -30,7 +30,6 @@ module "eks" {
   subnet_ids          = module.vpc.private_subnet_ids
   api_allowed_cidrs   = var.api_allowed_cidrs
   node_instance_types = var.node_instance_types
-  node_capacity_type  = var.node_capacity_type
 }
 
 module "rds" {

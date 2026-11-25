@@ -4,9 +4,9 @@
 PulseQueue is a compact telemetry & alerting control-plane portfolio project built to demonstrate senior-level architecture, reliability, and DevOps practices:
 - **Frontend (`apps/web`)**: React + TypeScript + Vite served via Nginx in a multi-stage container.
 - **Backend & Worker (`apps/api`)**: Python (FastAPI) API + background worker + PostgreSQL, with `/healthz` and `/readyz` endpoints and `SIGTERM` graceful shutdown.
-- **IaC (`infra/terraform`)**: Modular AWS provisioning (VPC, EKS, ECR, IRSA) with safe teardown support.
+- **IaC (`infra/terraform`)**: Modular AWS provisioning (VPC, EKS, ECR, RDS, Pod Identity) with safe teardown support.
 - **Kubernetes (`deploy/helm`)**: Helm chart with probes, HPA, PDB, and environment value overrides.
-- **CI/CD (`.github/workflows`)**: PR checks, immutable SHA image tags, OIDC auth, and deploy workflows.
+- **CI/CD (`.github/workflows`)**: PR checks, immutable SHA image tags, and image publishing to GHCR. CI holds no AWS credentials; deploys run from a developer machine with Helm.
 - **Docs (`docs/`)**: Architecture trade-offs (`architecture.md`) and failure runbooks (`runbook.md`).
 
 ## Token & Context Efficiency Rules
@@ -16,7 +16,7 @@ PulseQueue is a compact telemetry & alerting control-plane portfolio project bui
 - **Prefer diffs & targeted edits**: Make small, verifiable increments per step; check status/tests before moving to the next slice.
 
 ## Architectural & Production Standards
-- **Security first**: No hardcoded secrets, static AWS access keys in CI, or overly broad IAM policies. Use IRSA and GitHub OIDC where applicable.
+- **Security first**: No hardcoded secrets, static AWS access keys in CI, or overly broad IAM policies. Use EKS Pod Identity for workloads: the AWS Free plan blocks OIDC providers, so IRSA and GitHub OIDC are unavailable.
 - **Resilience by default**: Keep liveness (`/healthz`) and readiness (`/readyz`) distinct; handle `SIGTERM` cleanly so in-flight work drains; include HPA/PDB and sensible resource requests/limits in Helm.
 - **Cost & teardown awareness**: Keep infrastructure modular and easy to `terraform destroy` cleanly without leaving orphaned cloud resources.
 - **Explain trade-offs briefly**: When making an architectural or tooling choice, state *why* in 1–2 sentences and note the main trade-off.
@@ -24,7 +24,7 @@ PulseQueue is a compact telemetry & alerting control-plane portfolio project bui
 ## Working Cadence & Commands
 Work in small, vertical slices rather than scaffolding everything at once:
 1. Local stack (`docker compose` + unit tests + health checks)
-2. Core Terraform modules (`vpc`, `eks`, `ecr`, `irsa`) + teardown check
+2. Core Terraform modules (`vpc`, `eks`, `ecr`, `rds`, `pod-identity`) + teardown check
 3. Container builds + GitHub Actions CI/CD + Helm deployment
 4. Observability (RED metrics/logs/alerts) + `docs/architecture.md` & `docs/runbook.md`
 

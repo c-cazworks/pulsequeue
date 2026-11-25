@@ -18,7 +18,3 @@ variable "api_allowed_cidrs" {
 variable "node_instance_types" {
   type = list(string)
 }
-
-variable "node_capacity_type" {
-  type = string
-}

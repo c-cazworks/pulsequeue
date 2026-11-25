@@ -46,13 +46,3 @@ variable "node_instance_types" {
     error_message = "Use t3.small, c7i-flex.large or m7i-flex.large; the Free plan rejects other x86 types."
   }
 }
-
-variable "node_capacity_type" {
-  type    = string
-  default = "ON_DEMAND"
-
-  validation {
-    condition     = contains(["ON_DEMAND", "SPOT"], var.node_capacity_type)
-    error_message = "Use ON_DEMAND or SPOT."
-  }
-}

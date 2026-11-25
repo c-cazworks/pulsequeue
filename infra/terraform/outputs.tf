@@ -21,12 +21,3 @@ output "db_secret_arn" {
 output "vpc_id" {
   value = module.vpc.vpc_id
 }
-
-output "oidc_provider_arn" {
-  description = "Input for modules/irsa when granting workloads AWS access."
-  value       = module.eks.oidc_provider_arn
-}
-
-output "oidc_issuer" {
-  value = module.eks.oidc_issuer
-}

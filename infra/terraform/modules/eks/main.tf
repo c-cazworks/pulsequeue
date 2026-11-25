@@ -2,7 +2,6 @@ data "aws_partition" "current" {}
 
 locals {
   policy_prefix = "arn:${data.aws_partition.current.partition}:iam::aws:policy"
-  oidc_issuer   = trimprefix(aws_eks_cluster.this.identity[0].oidc[0].issuer, "https://")
 }
 
 # --- Control plane
@@ -61,27 +60,29 @@ resource "aws_eks_cluster" "this" {
   ]
 }
 
-resource "aws_iam_openid_connect_provider" "this" {
-  url            = aws_eks_cluster.this.identity[0].oidc[0].issuer
-  client_id_list = ["sts.amazonaws.com"]
+# --- Add-ons needed before nodes: they cannot become Ready without the CNI and its credentials
+resource "aws_eks_addon" "pod_identity_agent" {
+  cluster_name = aws_eks_cluster.this.name
+  addon_name   = "eks-pod-identity-agent"
 }
 
-# --- Networking add-ons: nodes cannot become Ready without these
-module "vpc_cni_irsa" {
-  source = "../irsa"
+module "vpc_cni_role" {
+  source = "../pod-identity"
 
-  role_name         = "${var.name}-vpc-cni"
-  oidc_provider_arn = aws_iam_openid_connect_provider.this.arn
-  oidc_issuer       = local.oidc_issuer
-  namespace         = "kube-system"
-  service_account   = "aws-node"
-  policy_arns       = { cni = "${local.policy_prefix}/AmazonEKS_CNI_Policy" }
+  role_name   = "${var.name}-vpc-cni"
+  policy_arns = { cni = "${local.policy_prefix}/AmazonEKS_CNI_Policy" }
 }
 
 resource "aws_eks_addon" "vpc_cni" {
-  cluster_name             = aws_eks_cluster.this.name
-  addon_name               = "vpc-cni"
-  service_account_role_arn = module.vpc_cni_irsa.role_arn
+  cluster_name = aws_eks_cluster.this.name
+  addon_name   = "vpc-cni"
+
+  pod_identity_association {
+    role_arn        = module.vpc_cni_role.role_arn
+    service_account = "aws-node"
+  }
+
+  depends_on = [aws_eks_addon.pod_identity_agent]
 }
 
 resource "aws_eks_addon" "kube_proxy" {
@@ -113,7 +114,7 @@ resource "aws_iam_role_policy_attachment" "node" {
 resource "aws_launch_template" "node" {
   name_prefix = "${var.name}-node-"
 
-  # IMDSv2 with one hop: pods cannot borrow the node role and must use IRSA.
+  # IMDSv2 with one hop: pods cannot borrow the node role and must use Pod Identity.
   metadata_options {
     http_endpoint               = "enabled"
     http_tokens                 = "required"
@@ -148,7 +149,7 @@ resource "aws_eks_node_group" "this" {
   node_role_arn   = aws_iam_role.node.arn
   subnet_ids      = var.subnet_ids
   ami_type        = "AL2023_x86_64_STANDARD"
-  capacity_type   = var.node_capacity_type
+  capacity_type   = "ON_DEMAND" # the Free plan blocks Spot
   instance_types  = var.node_instance_types
 
   launch_template {

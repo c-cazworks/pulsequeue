@@ -12,10 +12,6 @@ mock_provider "aws" {
     defaults = { arn = "arn:aws:iam::123456789012:role/mock" }
   }
 
-  mock_resource "aws_iam_openid_connect_provider" {
-    defaults = { arn = "arn:aws:iam::123456789012:oidc-provider/oidc.example.com/id/ABC" }
-  }
-
   mock_resource "aws_launch_template" {
     defaults = { id = "lt-0123456789abcdef0", latest_version = 1 }
   }
@@ -23,12 +19,6 @@ mock_provider "aws" {
   mock_resource "aws_db_instance" {
     defaults = {
       master_user_secret = [{ secret_arn = "arn:aws:secretsmanager:us-east-2:123456789012:secret:mock" }]
-    }
-  }
-
-  mock_resource "aws_eks_cluster" {
-    defaults = {
-      identity = [{ oidc = [{ issuer = "https://oidc.example.com/id/ABC" }] }]
     }
   }
 }
@@ -46,11 +36,6 @@ run "stack" {
   assert {
     condition     = toset(keys(module.ecr.repository_urls)) == toset(["pulsequeue/api", "pulsequeue/web"])
     error_message = "Expected one ECR repository per image."
-  }
-
-  assert {
-    condition     = output.oidc_issuer == "oidc.example.com/id/ABC"
-    error_message = "IRSA conditions need the issuer without https://."
   }
 }
 
@@ -107,25 +92,21 @@ run "rejects_instance_type_outside_free_plan" {
   expect_failures = [var.node_instance_types]
 }
 
-run "irsa_trusts_one_service_account" {
+run "pod_identity_trusts_only_eks_pods" {
   module {
-    source = "./modules/irsa"
+    source = "./modules/pod-identity"
   }
 
   variables {
-    role_name         = "test"
-    oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/oidc.example.com/id/ABC"
-    oidc_issuer       = "oidc.example.com/id/ABC"
-    namespace         = "ns"
-    service_account   = "sa"
-    policy_arns       = {}
+    role_name   = "test"
+    policy_arns = {}
   }
 
   assert {
     condition = (
-      jsondecode(aws_iam_role.this.assume_role_policy).Statement[0].Condition.StringEquals["oidc.example.com/id/ABC:sub"] == "system:serviceaccount:ns:sa" &&
-      jsondecode(aws_iam_role.this.assume_role_policy).Statement[0].Condition.StringEquals["oidc.example.com/id/ABC:aud"] == "sts.amazonaws.com"
+      jsondecode(aws_iam_role.this.assume_role_policy).Statement[0].Principal.Service == "pods.eks.amazonaws.com" &&
+      jsondecode(aws_iam_role.this.assume_role_policy).Statement[0].Condition.StringEquals["aws:SourceAccount"] == data.aws_caller_identity.current.account_id
     )
-    error_message = "Trust policy must pin both the service account and the audience."
+    error_message = "Only EKS Pod Identity in this account may assume the role."
   }
 }
