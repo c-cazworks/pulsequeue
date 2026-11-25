@@ -26,12 +26,21 @@ db_secret=$(tf -raw db_secret_arn)
 cidrs=$(tf -json allowed_cidrs)
 
 echo "==> Copying images for $TAG to ECR"
+# Not `docker login`: an ECR token is longer than Windows Credential Manager's 2560-byte limit.
+# A temporary config also leaves no tokens behind.
+umask 077
+DOCKER_CONFIG=$(mktemp -d)
+export DOCKER_CONFIG
+trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+trap 'exit 1' INT TERM
 # Captured first: a failed command on the left of a pipe would go unnoticed.
-gh_token=$(gh auth token)
 gh_user=$(gh api user --jq .login)
-printf '%s' "$gh_token" | docker login ghcr.io -u "$gh_user" --password-stdin >/dev/null
+gh_token=$(gh auth token)
 ecr_token=$(aws ecr get-login-password --region "$region")
-printf '%s' "$ecr_token" | docker login "$registry" -u AWS --password-stdin >/dev/null
+auth() { printf '%s:%s' "$1" "$2" | base64 | tr -d '\r\n'; }
+printf '{"auths":{"ghcr.io":{"auth":"%s"},"%s":{"auth":"%s"}}}' \
+  "$(auth "$gh_user" "$gh_token")" "$registry" "$(auth AWS "$ecr_token")" \
+  > "$DOCKER_CONFIG/config.json"
 for app in api web; do
   dst="$registry/pulsequeue/$app:$TAG"
   if docker buildx imagetools inspect "$dst" >/dev/null 2>&1; then
