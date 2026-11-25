@@ -1,0 +1,38 @@
+# Dependencies & Virtual Environments
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Build Artifacts & Coverage
+apps/web/dist/
+apps/web/build/
+coverage/
+htmlcov/
+*.egg-info/
+
+# Lockfiles (high token count, low architectural signal)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+poetry.lock
+uv.lock
+
+# Terraform & Kubernetes State / Vendor Caches
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+deploy/helm/charts/
+deploy/helm/*.tgz
+
+# Git, IDE & Local OS Noise
+.git/
+.DS_Store
+.idea/
+.vscode/
+*.log
