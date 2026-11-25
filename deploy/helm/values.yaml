@@ -1,0 +1,36 @@
+# Defaults shared by every environment. Overrides: values-aws.yaml, values-kind.yaml.
+image:
+  registry: ""    # images are <registry>/pulsequeue/{api,web}
+  tag: ""         # required: an immutable commit SHA
+  pullPolicy: IfNotPresent
+
+database:
+  host: ""
+  name: pulsequeue
+  user: pulsequeue
+  # Set exactly one of these.
+  secretArn: ""        # Secrets Manager, read through Pod Identity
+  existingSecret: ""   # Kubernetes Secret with a `password` key
+
+api:
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { memory: 256Mi }
+  autoscaling: { minReplicas: 2, maxReplicas: 4, targetCPUUtilizationPercentage: 70 }
+
+# No HPA: queue depth, not CPU, is what should scale the worker.
+worker:
+  replicas: 2
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { memory: 192Mi }
+
+web:
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { memory: 64Mi }
+  autoscaling: { minReplicas: 2, maxReplicas: 3, targetCPUUtilizationPercentage: 70 }
+
+ingress:
+  enabled: false
+  allowedCidrs: []   # required when enabled; the ALB default is open to the world

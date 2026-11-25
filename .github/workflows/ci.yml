@@ -1,0 +1,155 @@
+# Checks every PR; publishes images to GHCR from main. Holds no AWS credentials: deploys run from a
+# developer machine with scripts/deploy.sh. Actions are pinned to commit SHAs.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # A cancelled main run could leave a commit with only one of its images published.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: pulsequeue
+          POSTGRES_USER: pulsequeue
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U pulsequeue" --health-interval 2s --health-retries 20
+    env:
+      PULSEQUEUE_TEST_DB: "1"
+      PGHOST: 127.0.0.1
+      PGUSER: pulsequeue
+      PGDATABASE: pulsequeue
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: apps/api/requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest -q
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test -- --run
+
+  infra:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with: { terraform_version: 1.17.2 }
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with: { version: v4.3.2 }
+      - run: terraform -chdir=infra/terraform init -backend=false -input=false
+      - run: make validate-infra
+      - run: terraform -chdir=infra/terraform test # mocked; needs no credentials
+      - name: Render the AWS manifests
+        run: >-
+          helm template pulsequeue deploy/helm -n pulsequeue -f deploy/helm/values-aws.yaml
+          --set image.registry=example,image.tag=test,database.host=db
+          --set database.secretArn=arn:aws:secretsmanager:us-east-2:123456789012:secret:x
+          --set-json 'ingress.allowedCidrs=["203.0.113.4/32"]'
+      - name: The ingress must refuse to render without an allowlist
+        run: |
+          if out=$(helm template pulsequeue deploy/helm -f deploy/helm/values-aws.yaml \
+              --set image.registry=example,image.tag=test,database.host=db,database.existingSecret=s 2>&1); then
+            echo "rendered an ingress open to the world"; exit 1
+          fi
+          grep -q 'ingress.allowedCidrs is required' <<<"$out"
+
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TAG: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with: { version: v4.3.2 }
+      - run: docker build -t "local/pulsequeue/api:$TAG" apps/api
+      - run: docker build -t "local/pulsequeue/web:$TAG" apps/web
+      - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+        with: { cluster_name: smoke }
+      - run: kind load docker-image --name smoke "local/pulsequeue/api:$TAG" "local/pulsequeue/web:$TAG"
+      - run: bash scripts/kind-smoke.sh "$TAG"
+      # Hand the tested images to publish, so this job never holds a write token.
+      - if: github.event_name == 'push'
+        run: docker save "local/pulsequeue/api:$TAG" "local/pulsequeue/web:$TAG" | gzip > images.tar.gz
+      - if: github.event_name == 'push'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: images
+          path: images.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [api, web, infra, smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    env:
+      TAG: ${{ github.sha }}
+      REGISTRY: ghcr.io/${{ github.repository_owner }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { name: images }
+      - run: docker load -i images.tar.gz
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push, keeping SHA tags immutable
+        run: |
+          for app in api web; do
+            image="$REGISTRY/pulsequeue/$app:$TAG"
+            if docker manifest inspect "$image" >/dev/null 2>&1; then
+              echo "$image already exists; not overwriting"
+              continue
+            fi
+            docker tag "local/pulsequeue/$app:$TAG" "$image"
+            docker push "$image"
+          done

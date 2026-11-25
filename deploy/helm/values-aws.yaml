@@ -1,0 +1,3 @@
+# EKS. scripts/deploy.sh supplies the registry, tag, database and allowedCidrs from Terraform.
+ingress:
+  enabled: true

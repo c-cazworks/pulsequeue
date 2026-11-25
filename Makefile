@@ -1,4 +1,4 @@
-.PHONY: help up down logs test lint validate-infra helm-lint tf-init tf-plan tf-apply check-cluster k8s-cleanup tf-destroy
+.PHONY: help up down logs test lint validate-infra helm-lint tf-init tf-plan tf-apply check-cluster deploy k8s-cleanup tf-destroy
 
 TF_DIR   := infra/terraform
 HELM_DIR := deploy/helm
@@ -57,11 +57,15 @@ check-cluster: ## Fail unless kubectl points at the PulseQueue EKS cluster
 		   exit 1 ;; \
 	esac
 
-k8s-cleanup: check-cluster ## Remove the release and release its load balancers
-	-kubectl delete ingress --all -n $(NS) --ignore-not-found=true
-	-helm uninstall $(RELEASE) -n $(NS)
-	@echo "Waiting 20s for AWS Load Balancer Controller to release ALBs..."
-	@sleep 20
+deploy: check-cluster ## Deploy a CI-published commit to EKS (TAG=<sha>, default origin/main)
+	sh scripts/deploy.sh $(TAG)
+
+# Deleting an ingress waits until the controller has deleted its ALB. A failure stops tf-destroy,
+# because removing the controller first would orphan the ALB and block deleting the VPC.
+k8s-cleanup: check-cluster ## Remove the load balancer, then the release
+	kubectl delete ingress --all -n $(NS) --ignore-not-found=true --timeout=5m
+	-helm uninstall $(RELEASE) -n $(NS) --ignore-not-found
+	-helm uninstall aws-load-balancer-controller -n kube-system --ignore-not-found
 
 # Skips the Kubernetes step when there is no cluster, so a failed apply can still be destroyed.
 tf-destroy: ## Cleanly tear down K8s ingress/load balancers before destroying AWS infra
