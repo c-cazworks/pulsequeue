@@ -1,0 +1,3 @@
+# Copy to terraform.tfvars (gitignored).
+api_allowed_cidrs = ["203.0.113.4/32"] # your public IP
+# node_capacity_type = "SPOT"          # cheaper, but nodes can be reclaimed

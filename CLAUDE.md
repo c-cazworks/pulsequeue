@@ -32,3 +32,13 @@ Use `make` targets or standard local commands (`pytest`, `npm test` / `npm run b
 
 ## When to Ask Before Acting
 Pause and ask a brief question only when a choice has lasting architectural or cost impact (e.g., AWS-native vs. self-hosted observability stack, managed RDS vs. in-cluster/local DB for dev, or breaking schema/API changes). Otherwise, make a pragmatic default and state it clearly.
+
+
+## AWS
+<!-- BEGIN AWS Agent Toolkit rules (short form) -->
+- Full AWS rules: `docs/runbook.md` ("AWS rules"). Read them before any AWS-specific task, not otherwise.
+- AWS project in the new AWS experience, **Free plan**. Never upgrade the plan or activate advanced features.
+- Everything in `us-east-2`; other Regions are blocked. CLI profile: `pulsequeue`.
+- Credits are limited: run AWS only for demos, then `make tf-destroy`. Prefer free or low-cost options.
+- EC2 instance types are limited to those the Free plan allows (`t3.small` by default).
+<!-- END AWS Agent Toolkit rules (short form) -->
