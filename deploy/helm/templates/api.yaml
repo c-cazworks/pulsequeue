@@ -28,6 +28,8 @@ spec:
           {{- include "pq.image" (dict "root" . "name" "api") | nindent 10 }}
           env:
             {{- include "pq.databaseEnv" . | nindent 12 }}
+            - name: SIMULATION_ENABLED
+              value: {{ .Values.simulator.allowSwitching | quote }}
           ports:
             - { name: http, containerPort: 8000 }
           startupProbe:

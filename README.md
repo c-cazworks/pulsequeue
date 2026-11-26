@@ -1,6 +1,8 @@
 # pulsequeue
-A small telemetry and alerting service: a React dashboard, a Python API and background worker, and
-PostgreSQL, deployed to AWS EKS with Terraform, Helm and GitHub Actions.
+The async event and webhook dispatch pipeline for a commerce platform: payment authorizations,
+invoices, inventory reservations and partner webhooks, each with its own latency objective. A React
+on-call console, a Python API and workers on a PostgreSQL queue, and a built-in scenario engine
+that injects realistic failures. Deployed to AWS EKS with Terraform, Helm and GitHub Actions.
 
 ## Running a demo
 
@@ -34,6 +36,21 @@ npm.cmd ci --prefix apps/web
 
 What each alert means and what to do about it: [docs/runbook.md](docs/runbook.md). Design and
 trade-offs: [docs/architecture.md](docs/architecture.md).
+
+#### The failure demo
+
+A simulator sends about 10 events a second as soon as the stack starts. Switch scenarios with the
+buttons at the top of the console:
+
+| Button | What breaks | What you see |
+|---|---|---|
+| Healthy | Nothing | All objectives met, queue lag under 1 s, no alerts |
+| Webhook 5xx | One partner's endpoint fails 30% of deliveries | Webhook retries climb and `DeliveryErrorRate` fires for `webhook.partner_notify` only: payments stay healthy |
+| Queue backlog | Every dependency slows down, webhooks fail half the time | Work arrives faster than two workers drain it: queue lag climbs, `LatencySLOBreach` fires per event type, then `QueueLag` goes critical |
+| Recover | Faults cleared, traffic reduced | The backlog drains in a minute or two, alerts resolve, and the scenario returns to Healthy by itself |
+
+Alerts take about a minute to fire: each rule looks at the last 60 seconds and must hold for 30.
+The same thresholds drive Prometheus locally, so its alerts match the console's.
 
 ### Option B: AWS (uses Free plan credits)
 
@@ -87,8 +104,8 @@ make tf-init
    make deploy                  # latest origin/main; or: make deploy TAG=<full commit sha>
    ```
 
-   It prints the dashboard's URL. Only the addresses in `api_allowed_cidrs` can open it. It is plain
-   HTTP, because TLS needs a domain.
+   It prints the console's URL. Only the addresses in `api_allowed_cidrs` can open it. It is plain
+   HTTP, because TLS needs a domain. The simulator runs here too, so the failure demo works on EKS.
 
 6. Monitoring: CloudWatch alarms watch the ALB and the database. To get them by email, set
    `alert_email` in `terraform.tfvars` before applying, then click the confirmation link AWS sends.

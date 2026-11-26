@@ -33,7 +33,7 @@ def client(pool: FakePool, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
         yield test_client
 
 
-EVENT = {"source": "web-1", "metric": "cpu.load", "value": 0.9, "threshold": 0.8}
+EVENT = {"event_type": "payment.authorized", "payload": {"id": "pay_1", "amount_cents": 1200}}
 
 
 def test_create_event_is_accepted(client: TestClient) -> None:
@@ -43,15 +43,32 @@ def test_create_event_is_accepted(client: TestClient) -> None:
 
 
 @pytest.mark.parametrize(
-    "change", [{"source": ""}, {"source": "a\x00b"}, {"metric": "x" * 101}, {"value": "inf"}]
+    "change",
+    [
+        {"event_type": "payment.refunded"},
+        {"event_type": ""},
+        {"payload": ["not", "an", "object"]},
+        {"payload": {"blob": "x" * 5000}},
+    ],
 )
 def test_invalid_event_is_rejected(client: TestClient, change: dict) -> None:
     assert client.post("/api/events", json=EVENT | change).status_code == 422
 
 
-@pytest.mark.parametrize("limit", [0, 101])
-def test_list_limit_is_bounded(client: TestClient, limit: int) -> None:
-    assert client.get(f"/api/events?limit={limit}").status_code == 422
+@pytest.mark.parametrize("query", ["limit=0", "limit=101", "filter=everything"])
+def test_list_query_is_validated(client: TestClient, query: str) -> None:
+    assert client.get(f"/api/events?{query}").status_code == 422
+
+
+def test_unknown_scenario_is_rejected(client: TestClient) -> None:
+    assert client.put("/api/scenario", json={"profile": "meltdown"}).status_code == 422
+
+
+def test_scenario_switching_can_be_disabled(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SIMULATION_ENABLED", "false")
+    assert client.put("/api/scenario", json={"profile": "healthy"}).status_code == 403
 
 
 @pytest.mark.parametrize("error", [ConnectionRefusedError("db.internal"), TimeoutError()])

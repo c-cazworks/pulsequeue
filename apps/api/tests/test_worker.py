@@ -22,14 +22,6 @@ def heartbeat_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return file
 
 
-@pytest.mark.parametrize(
-    ("value", "threshold", "breached"),
-    [(5.0, None, False), (5.0, 10.0, False), (10.0, 10.0, False), (10.1, 10.0, True)],
-)
-async def test_evaluate(value: float, threshold: float | None, breached: bool) -> None:
-    assert await worker.evaluate({"value": value, "threshold": threshold}) is breached
-
-
 async def test_stop_lets_in_flight_event_finish(monkeypatch: pytest.MonkeyPatch) -> None:
     started, release = asyncio.Event(), asyncio.Event()
     finished = 0

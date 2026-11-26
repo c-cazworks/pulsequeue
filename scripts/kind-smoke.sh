@@ -18,7 +18,7 @@ dump() {
   echo "--- smoke test failed" >&2
   kubectl -n "$NS" get pods -o wide >&2 || true
   kubectl -n "$NS" get events --sort-by=.lastTimestamp 2>/dev/null | tail -n 20 >&2 || true
-  for c in migrate api worker web; do
+  for c in migrate api worker simulator web; do
     kubectl -n "$NS" logs -l "app.kubernetes.io/component=$c" --tail=20 --prefix >&2 || true
   done
 }
@@ -38,25 +38,33 @@ helm upgrade --install pulsequeue deploy/helm -n "$NS" -f deploy/helm/values-kin
   --set image.tag="$TAG" --wait --timeout 4m
 
 # Through nginx -> API -> Postgres -> worker, from inside the cluster.
+# Helm --wait covered the simulator pod; the summary check below covers its traffic.
 kubectl -n "$NS" exec -i deploy/pulsequeue-api -- python - <<'PY'
 import json, time, urllib.request
 
 BASE = "http://pulsequeue-web"
 
-def call(path, body=None):
+def call(path, body=None, method=None):
     data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(BASE + path, data, {"Content-Type": "application/json"})
+    req = urllib.request.Request(BASE + path, data, {"Content-Type": "application/json"}, method=method)
     with urllib.request.urlopen(req, timeout=10) as res:
         return json.load(res)
 
-event_id = call("/api/events", {"source": "smoke", "metric": "m", "value": 2, "threshold": 1})["id"]
+event_id = call("/api/events", {"event_type": "payment.authorized", "payload": {"id": "pay_smoke"}})["id"]
 for _ in range(30):
-    event = next(e for e in call("/api/events") if e["id"] == event_id)
-    if event["status"] == "processed":
-        assert event["breached"] is True, event
-        print("smoke test passed:", event)
+    event = call(f"/api/events/{event_id}")
+    if event["state"] == "processed":
+        print("event delivered:", event)
         break
     time.sleep(1)
 else:
     raise SystemExit(f"event never processed: {event}")
+
+# The console's controls: switch the scenario and see it in the summary, then switch back.
+assert call("/api/scenario", {"profile": "recover"}, "PUT")["profile"] == "recover"
+summary = call("/api/summary")
+assert summary["scenario"]["profile"] in ("recover", "healthy"), summary["scenario"]
+assert summary["throughput_per_second"] > 0, summary  # the simulator is sending traffic
+call("/api/scenario", {"profile": "healthy"}, "PUT")
+print("smoke test passed: scenario switching and summary work")
 PY

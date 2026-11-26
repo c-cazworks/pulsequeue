@@ -11,6 +11,7 @@ alarms in `infra/terraform/modules/monitoring`, sent to the SNS topic `pulsequeu
 
 | | Local (Docker Compose) | EKS |
 |---|---|---|
+| Console (scenario, alerts, SLOs per event type) | http://localhost:8080 | The URL `make deploy` prints |
 | Dashboard | Grafana: http://localhost:3000 | CloudWatch: `terraform -chdir=infra/terraform output dashboard_url` |
 | Logs (JSON) | `docker compose logs -f api worker` | `kubectl -n pulsequeue logs -l app.kubernetes.io/component=api --tail=100` |
 | App metrics | Prometheus: http://localhost:9090 | `kubectl -n pulsequeue port-forward deploy/pulsequeue-worker 9100`, then http://localhost:9100 |
@@ -51,38 +52,79 @@ Alerts: `ApiSlow` (p95 above 500 ms, local); `pulsequeue-alb-slow` (average abov
    the nodes may be full: `kubectl get pods -A --field-selector=status.phase=Pending`. Two
    `t3.small` nodes fit 22 pods in total.
 
-## Queue backlog or worker down
+## Is it a demo scenario?
 
-Alerts: `WorkerDown`, `QueueBacklog` (oldest pending event older than 2 minutes, for 5 minutes).
+The console's badge shows the active scenario. Anything other than **HEALTHY** means the failures
+are injected on purpose: `PARTIAL DEGRADATION` fails partner webhooks, and
+`BACKLOG / SLO BREACH` slows every delivery. Click **Recover** to end it. The sections below are
+written as if the failure were real, which is how to practise them.
+
+## Queue lag or worker down
+
+Alerts: `WorkerDown`; `QueueLag` (ready events have waited over 30 s for a worker, for 30 s).
+
+Queue lag counts only events that are ready to run. Events waiting out a retry backoff are not
+late, and appear under "retrying" instead.
 
 1. **Is a worker running?**
    - Local: `docker compose ps worker`.
    - EKS: `kubectl -n pulsequeue get pods -l app.kubernetes.io/component=worker`. A restart loop
      with a failing liveness probe means the poll loop is stuck: the heartbeat goes stale after 60 s.
 2. **Is it polling?** The Grafana panel "Seconds since each worker polled" should stay near 1 s.
-3. **Is it keeping up?** Compare "Events finished per second" with the API's `POST /api/events`
-   rate. If it stays lower, add a replica: `--set worker.replicas=3` on EKS, or
-   `docker compose up -d --scale worker=2` locally. Claims use `SKIP LOCKED`, so replicas never
-   process the same event.
-4. **Is the database slow?** A slow claim query slows every worker. See
+3. **Is it keeping up?** On the console, compare Throughput with the arrival rate (10/s when
+   healthy). Slow deliveries cut throughput: check the p95 column per event type. If workers stay
+   behind, add a replica: `--set worker.replicas=3` on EKS, or `docker compose up -d --scale
+   worker=3` locally. Claims use `SKIP LOCKED`, so replicas never process the same event.
+4. **Is one dependency slow?** If one event type's p95 is far above its objective, that dependency
+   is holding every worker. Lowering `HANDLER_TIMEOUT_SECONDS` sheds it faster, at the cost of more
+   retries.
+5. **Is the database slow?** A slow claim query slows every worker. See
    [Database under pressure](#database-under-pressure).
 
-A restarted worker can briefly report an old event's age before it drains the queue. That only
-fires `QueueBacklog` if it lasts 5 minutes.
+While the backlog lasts, the simulator stops sending at 5,000 pending events.
 
-## Events failing
+## Delivery errors
 
-Alert: `EventsFailing` (an event used all 5 attempts).
+Alert: `DeliveryErrorRate` (more than 5% of one event type's delivery attempts failed over the
+last minute, for 30 s). The alert names the event type.
 
-1. Find them and the reason (locally, open a shell with `docker compose exec db psql -U pulsequeue`):
+1. **One type or all of them?** The console's "By event type" table shows it. One type failing
+   points at its downstream (a partner's endpoint for `webhook.partner_notify`); all types failing
+   points at something shared, such as the network or NAT gateway.
+2. **What does the downstream say?** Filter the console's events to "Errors and retries" and read
+   **Last error**, or the worker logs' `delivery failed` lines and their `error` field.
+3. **Is anything being lost?** No, while retries succeed: events retry with backoff (2, 4, 8,
+   16 s), and only after 5 failed attempts are they dead-lettered. Watch for `EventsDeadLettered`.
+4. A partner that is down for long only retries its own events. Other event types keep their
+   latency unless the queue lag rises too.
+
+## Latency SLO breach
+
+Alert: `LatencySLOBreach` (one event type's p95 delivery time is above its objective: 250 ms for
+payments, 300 ms for inventory, 500 ms for invoices, 1 s for partner webhooks).
+
+1. **Which dependency?** The alert names the event type. Payments breaching first matters most:
+   a customer is waiting at checkout.
+2. **Is it slow, or queued?** This measures delivery time only. Time spent waiting in the queue is
+   `QueueLag`. Both together mean slow deliveries are also starving the workers.
+3. Slow deliveries hold workers longer, so throughput drops: see
+   [Queue lag or worker down](#queue-lag-or-worker-down).
+
+## Events dead-lettered
+
+Alert: `EventsDeadLettered` (an event failed all 5 attempts in the last 5 minutes).
+
+1. Find them and the reason. The console's "Errors and retries" filter shows them as
+   **Dead-lettered**. Or in SQL (locally, open a shell with
+   `docker compose exec db psql -U pulsequeue`):
 
    ```sql
-   SELECT id, source, metric, attempts, last_error FROM events
+   SELECT id, event_type, payload->>'id' AS reference, attempts, last_error FROM events
    WHERE status = 'failed' ORDER BY id DESC LIMIT 20;
    ```
 
-2. Worker logs show each failed attempt with its stack trace, in the `exception` field.
-3. After fixing the cause, requeue them:
+2. Worker logs show each failed attempt, with a stack trace in `exception` for unexpected errors.
+3. After fixing the cause, replay them. Dead-lettered events are kept for a day:
 
    ```sql
    UPDATE events SET status = 'pending', attempts = 0, available_at = now() WHERE status = 'failed';

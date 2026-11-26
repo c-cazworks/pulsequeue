@@ -38,7 +38,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 24,
+        "w": 16,
         "x": 0,
         "y": 0
       },
@@ -92,6 +92,42 @@
         }
       ],
       "id": 1
+    },
+    {
+      "type": "stat",
+      "title": "Scenario",
+      "description": "Scrape targets answering, per job. 0 means down.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "name"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (profile) (pulsequeue_scenario) == 1",
+          "legendFormat": "{{profile}}"
+        }
+      ],
+      "id": 13
     },
     {
       "type": "row",
@@ -363,8 +399,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Oldest pending event",
-      "description": "QueueBacklog fires above 2 minutes for 5 minutes.",
+      "title": "Queue lag (ready events waiting for a worker)",
+      "description": "Events waiting out a retry backoff are not counted. QueueLag fires above 30 s.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -398,15 +434,15 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(pulsequeue_queue_oldest_pending_age_seconds)",
-          "legendFormat": "age"
+          "expr": "max(pulsequeue_queue_lag_seconds)",
+          "legendFormat": "lag"
         }
       ],
       "id": 9
     },
     {
       "type": "timeseries",
-      "title": "Events finished per second",
+      "title": "Delivery attempts per second",
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -449,7 +485,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Event evaluation time",
+      "title": "Delivery time (all event types)",
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -484,7 +520,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(pulsequeue_worker_event_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(pulsequeue_worker_event_duration_seconds_bucket[1m])))",
           "legendFormat": "p50"
         },
         {
@@ -493,7 +529,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(pulsequeue_worker_event_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(pulsequeue_worker_event_duration_seconds_bucket[1m])))",
           "legendFormat": "p95"
         }
       ],
@@ -541,6 +577,134 @@
         }
       ],
       "id": 12
+    },
+    {
+      "type": "row",
+      "title": "Deliveries by event type",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "panels": [],
+      "id": 14
+    },
+    {
+      "type": "timeseries",
+      "title": "p95 delivery time vs objective",
+      "description": "Dashed lines are each type's objective. LatencySLOBreach fires when p95 stays above it for 30 s.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 39
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*objective"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (event_type, le) (rate(pulsequeue_worker_event_duration_seconds_bucket[1m])))",
+          "legendFormat": "{{event_type}} p95"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (event_type) (pulsequeue_delivery_slo_seconds)",
+          "legendFormat": "{{event_type}} objective"
+        }
+      ],
+      "id": 15
+    },
+    {
+      "type": "timeseries",
+      "title": "Failed attempts by event type",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (event_type) (rate(pulsequeue_worker_events_total{outcome!=\"processed\"}[1m])) / sum by (event_type) (rate(pulsequeue_worker_events_total[1m]))",
+          "legendFormat": "{{event_type}}"
+        }
+      ],
+      "id": 16
     }
   ]
 }

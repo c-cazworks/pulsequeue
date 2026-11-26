@@ -25,6 +25,14 @@ worker:
     requests: { cpu: 50m, memory: 96Mi }
     limits: { memory: 192Mi }
 
+# Demo traffic and the console's scenario buttons (app/scenarios.py).
+simulator:
+  enabled: true
+  allowSwitching: true # false makes PUT /api/scenario return 403
+  resources:
+    requests: { cpu: 25m, memory: 64Mi }
+    limits: { memory: 128Mi }
+
 web:
   resources:
     requests: { cpu: 25m, memory: 32Mi }

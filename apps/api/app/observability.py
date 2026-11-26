@@ -19,20 +19,29 @@ HTTP_DURATION = Histogram(
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
 )
 
-# --- Worker
+# --- Worker. event_type has four values, so the label stays cheap.
 WORKER_EVENTS = Counter(
-    "pulsequeue_worker_events_total", "Events finished by the worker", ["outcome"]
+    "pulsequeue_worker_events_total", "Delivery attempts finished", ["outcome", "event_type"]
 )
 WORKER_EVENT_DURATION = Histogram(
-    "pulsequeue_worker_event_duration_seconds", "Time spent evaluating one event"
+    "pulsequeue_worker_event_duration_seconds",
+    "Time spent on one delivery attempt",
+    ["event_type"],
+    # Edges at every SLO (250, 300, 500, 1000 ms), so p95 against them is exact enough.
+    buckets=(0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.75, 1, 2.5, 5, 10),
 )
 WORKER_LAST_POLL = Gauge(
     "pulsequeue_worker_last_poll_timestamp_seconds", "When the worker last polled the queue"
 )
+DELIVERY_SLO = Gauge(
+    "pulsequeue_delivery_slo_seconds", "p95 latency objective per event type", ["event_type"]
+)
+SCENARIO = Gauge("pulsequeue_scenario", "1 for the active demo scenario", ["profile"])
 # Every worker replica reports the same queue, so query these with max().
 QUEUE_PENDING = Gauge("pulsequeue_queue_pending", "Events waiting to be processed")
-QUEUE_OLDEST_AGE = Gauge(
-    "pulsequeue_queue_oldest_pending_age_seconds", "Age of the oldest pending event (0 if none)"
+QUEUE_LAG = Gauge(
+    "pulsequeue_queue_lag_seconds",
+    "How long the oldest ready event has waited for a worker (0 if none)",
 )
 QUEUE_FAILED = Gauge("pulsequeue_queue_failed", "Events that exhausted their retries")
 

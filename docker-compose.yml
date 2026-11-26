@@ -56,9 +56,27 @@ services:
   worker:
     <<: *api-image
     command: ["python", "-m", "app.worker"]
+    deploy:
+      replicas: 2 # as on EKS; the scenarios are sized for two
     depends_on:
       migrate:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # Synthetic payment and webhook traffic; switch scenarios from the console.
+  simulator:
+    <<: *api-image
+    command: ["python", "-m", "app.simulator"]
+    environment:
+      SIMULATOR_API_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-m", "app.heartbeat"]
       interval: 10s
