@@ -1,0 +1,48 @@
+{{- if .Values.simulator.enabled }}
+{{- $ctx := dict "root" . "component" "simulator" -}}
+# Synthetic traffic for demos. One replica: traffic must not scale with anything else.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-simulator
+  labels:
+    {{- include "pq.labels" $ctx | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # never two at once, which would double the traffic
+  selector:
+    matchLabels:
+      {{- include "pq.selector" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "pq.labels" $ctx | nindent 8 }}
+    spec:
+      # Talks only to the API over HTTP: no AWS role and no database access needed.
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        {{- include "pq.podSecurity" 10001 | nindent 8 }}
+      containers:
+        - name: simulator
+          {{- include "pq.image" (dict "root" . "name" "api") | nindent 10 }}
+          command: ["python", "-m", "app.simulator"]
+          env:
+            - name: SIMULATOR_API_URL
+              value: "http://{{ .Release.Name }}-api:8000"
+          livenessProbe:
+            exec: { command: ["python", "-m", "app.heartbeat"] }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+          securityContext:
+            {{- include "pq.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.simulator.resources | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp } # heartbeat file
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

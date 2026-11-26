@@ -2,26 +2,33 @@
 rule_files:
   - alerts.yml
 
-evaluation_interval: 1m
+evaluation_interval: 15s
 
 tests:
   - name: healthy system raises nothing
-    interval: 1m
+    interval: 15s
     input_series:
-      - { series: 'up{job="api"}', values: "1x30" }
-      - { series: 'up{job="worker"}', values: "1x30" }
-      - { series: 'pulsequeue_http_requests_total{status="202"}', values: "0+60x30" }
-      - { series: 'pulsequeue_http_requests_total{status="503"}', values: "0+1x30" }
-      - { series: 'pulsequeue_queue_oldest_pending_age_seconds', values: "5x30" }
-      - { series: 'pulsequeue_worker_events_total{outcome="failed"}', values: "0x30" }
+      - { series: 'up{job="api"}', values: "1x120" }
+      - { series: 'up{job="worker"}', values: "1x120" }
+      - { series: 'pulsequeue_http_requests_total{status="202"}', values: "0+150x120" }
+      - { series: 'pulsequeue_http_requests_total{status="503"}', values: "0+1x120" }
+      - { series: 'pulsequeue_queue_lag_seconds', values: "1x120" }
+      - { series: 'pulsequeue_worker_events_total{outcome="processed",event_type="payment.authorized"}', values: "0+60x120" }
+      - { series: 'pulsequeue_worker_events_total{outcome="failed",event_type="payment.authorized"}', values: "0x120" }
+      - { series: 'pulsequeue_worker_event_duration_seconds_bucket{event_type="payment.authorized",le="0.25"}', values: "0+60x120" }
+      - { series: 'pulsequeue_worker_event_duration_seconds_bucket{event_type="payment.authorized",le="+Inf"}', values: "0+60x120" }
+      - { series: 'pulsequeue_worker_event_duration_seconds_count{event_type="payment.authorized"}', values: "0+60x120" }
+      - { series: 'pulsequeue_delivery_slo_seconds{event_type="payment.authorized"}', values: "0.25x120" }
     alert_rule_test:
       - { eval_time: 30m, alertname: ApiHighErrorRate, exp_alerts: [] }
       - { eval_time: 30m, alertname: ApiDown, exp_alerts: [] }
       - { eval_time: 30m, alertname: WorkerDown, exp_alerts: [] }
-      - { eval_time: 30m, alertname: QueueBacklog, exp_alerts: [] }
-      - { eval_time: 30m, alertname: EventsFailing, exp_alerts: [] }
+      - { eval_time: 30m, alertname: QueueLag, exp_alerts: [] }
+      - { eval_time: 30m, alertname: DeliveryErrorRate, exp_alerts: [] }
+      - { eval_time: 30m, alertname: LatencySLOBreach, exp_alerts: [] }
+      - { eval_time: 30m, alertname: EventsDeadLettered, exp_alerts: [] }
 
-  - name: error rate above 5% with real traffic
+  - name: API error rate above 5% with real traffic
     interval: 1m
     input_series:
       - { series: 'pulsequeue_http_requests_total{status="202"}', values: "0+60x20" }
@@ -54,31 +61,104 @@ tests:
           - exp_labels: { severity: critical, job: worker }
             exp_annotations:
               summary: No worker is answering scrapes
-              runbook: docs/runbook.md#queue-backlog-or-worker-down
+              runbook: docs/runbook.md#queue-lag-or-worker-down
 
-  - name: backlog uses the oldest age across replicas
+  - name: a replaced replica's stale target does not page
     interval: 1m
     input_series:
-      - { series: 'pulsequeue_queue_oldest_pending_age_seconds{instance="a"}', values: "0+60x10" }
-      - { series: 'pulsequeue_queue_oldest_pending_age_seconds{instance="b"}', values: "0+60x10" }
+      - { series: 'up{job="worker",instance="old:9100"}', values: "0x10" }
+      - { series: 'up{job="worker",instance="new:9100"}', values: "1x10" }
     alert_rule_test:
-      - eval_time: 10m
-        alertname: QueueBacklog
-        exp_alerts:
-          - exp_labels: { severity: warning }
-            exp_annotations:
-              summary: The oldest pending event has waited 10m 0s
-              runbook: docs/runbook.md#queue-backlog-or-worker-down
+      - { eval_time: 10m, alertname: WorkerDown, exp_alerts: [] }
 
-  - name: an exhausted event raises EventsFailing
+  - name: every replica down is noticed
     interval: 1m
     input_series:
-      - { series: 'pulsequeue_worker_events_total{outcome="failed"}', values: "0 0 1 1 1" }
+      - { series: 'up{job="api",instance="a:8000"}', values: "0x10" }
+      - { series: 'up{job="api",instance="b:8000"}', values: "0x10" }
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ApiDown
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: The API is not answering scrapes
+              runbook: docs/runbook.md#api-errors-or-api-down
+
+  # downstream_degradation: 30% of partner webhooks fail; payments are unaffected.
+  - name: a failing partner alerts on its event type only
+    interval: 15s
+    input_series:
+      - { series: 'pulsequeue_worker_events_total{outcome="processed",event_type="webhook.partner_notify"}', values: "0+21x40" }
+      - { series: 'pulsequeue_worker_events_total{outcome="retried",event_type="webhook.partner_notify"}', values: "0+9x40" }
+      - { series: 'pulsequeue_worker_events_total{outcome="processed",event_type="payment.authorized"}', values: "0+30x40" }
+      - { series: 'pulsequeue_worker_events_total{outcome="retried",event_type="payment.authorized"}', values: "0x40" }
+    alert_rule_test:
+      - { eval_time: 30s, alertname: DeliveryErrorRate, exp_alerts: [] } # pending for 30 s first
+      - eval_time: 5m
+        alertname: DeliveryErrorRate
+        exp_alerts:
+          - exp_labels: { severity: warning, event_type: webhook.partner_notify }
+            exp_annotations:
+              summary: 30% of webhook.partner_notify deliveries are failing
+              runbook: docs/runbook.md#delivery-errors
+
+  - name: failures on a quiet event type do not page
+    interval: 1m
+    input_series:
+      - { series: 'pulsequeue_worker_events_total{outcome="retried",event_type="inventory.reserve"}', values: "0+1x10" }
+    alert_rule_test:
+      - { eval_time: 10m, alertname: DeliveryErrorRate, exp_alerts: [] }
+
+  # retry_storm_backlog: 90% of payments take 250-500 ms against a 250 ms objective; webhooks
+  # have the same latency but a 1 s objective.
+  - name: each event type is held to its own latency objective
+    interval: 15s
+    input_series:
+      - { series: 'pulsequeue_worker_event_duration_seconds_bucket{event_type="payment.authorized",le="0.25"}', values: "0+3x40" }
+      - { series: 'pulsequeue_worker_event_duration_seconds_bucket{event_type="payment.authorized",le="0.5"}', values: "0+30x40" }
+      - { series: 'pulsequeue_worker_event_duration_seconds_bucket{event_type="payment.authorized",le="+Inf"}', values: "0+30x40" }
+      - { series: 'pulsequeue_worker_event_duration_seconds_count{event_type="payment.authorized"}', values: "0+30x40" }
+      - { series: 'pulsequeue_worker_event_duration_seconds_bucket{event_type="webhook.partner_notify",le="0.25"}', values: "0+3x40" }
+      - { series: 'pulsequeue_worker_event_duration_seconds_bucket{event_type="webhook.partner_notify",le="0.5"}', values: "0+30x40" }
+      - { series: 'pulsequeue_worker_event_duration_seconds_bucket{event_type="webhook.partner_notify",le="+Inf"}', values: "0+30x40" }
+      - { series: 'pulsequeue_worker_event_duration_seconds_count{event_type="webhook.partner_notify"}', values: "0+30x40" }
+      - { series: 'pulsequeue_delivery_slo_seconds{event_type="payment.authorized",instance="a"}', values: "0.25x40" }
+      - { series: 'pulsequeue_delivery_slo_seconds{event_type="payment.authorized",instance="b"}', values: "0.25x40" }
+      - { series: 'pulsequeue_delivery_slo_seconds{event_type="webhook.partner_notify"}', values: "1x40" }
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: LatencySLOBreach
+        exp_alerts:
+          - exp_labels: { severity: warning, event_type: payment.authorized }
+            exp_annotations:
+              summary: payment.authorized p95 delivery latency is 486.1ms
+              runbook: docs/runbook.md#latency-slo-breach
+
+  - name: queue lag uses the worst replica and must hold for 30 seconds
+    interval: 15s
+    input_series:
+      - { series: 'pulsequeue_queue_lag_seconds{instance="a"}', values: "0+15x8" }
+      - { series: 'pulsequeue_queue_lag_seconds{instance="b"}', values: "0x8" }
+    alert_rule_test:
+      - { eval_time: 45s, alertname: QueueLag, exp_alerts: [] } # 45 s: just breached
+      - eval_time: 2m
+        alertname: QueueLag
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: Ready events have waited 2m 0s for a worker
+              runbook: docs/runbook.md#queue-lag-or-worker-down
+
+  - name: an exhausted event raises EventsDeadLettered
+    interval: 1m
+    input_series:
+      - { series: 'pulsequeue_worker_events_total{outcome="failed",event_type="webhook.partner_notify"}', values: "0 0 1 1 1" }
     alert_rule_test:
       - eval_time: 4m
-        alertname: EventsFailing
+        alertname: EventsDeadLettered
         exp_alerts:
           - exp_labels: { severity: warning }
             exp_annotations:
-              summary: "Events that exhausted their retries in 15 minutes: 1"
-              runbook: docs/runbook.md#events-failing
+              summary: "Events that exhausted their retries in 5 minutes: 1"
+              runbook: docs/runbook.md#events-dead-lettered

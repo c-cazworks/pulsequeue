@@ -3,7 +3,8 @@ groups:
   - name: pulsequeue
     rules:
       - alert: ApiDown
-        expr: up{job="api"} == 0 or absent(up{job="api"})
+        # Any healthy replica is enough: a replaced container's old target must not page.
+        expr: max(up{job="api"}) == 0 or absent(up{job="api"})
         for: 2m
         labels: { severity: critical }
         annotations:
@@ -33,25 +34,53 @@ groups:
           runbook: docs/runbook.md#api-slow
 
       - alert: WorkerDown
-        expr: up{job="worker"} == 0 or absent(up{job="worker"})
+        expr: max(up{job="worker"}) == 0 or absent(up{job="worker"})
         for: 2m
         labels: { severity: critical }
         annotations:
           summary: No worker is answering scrapes
-          runbook: docs/runbook.md#queue-backlog-or-worker-down
+          runbook: docs/runbook.md#queue-lag-or-worker-down
 
-      - alert: QueueBacklog
-        # max(): every worker replica reports the same queue.
-        expr: max(pulsequeue_queue_oldest_pending_age_seconds) > 120
-        for: 5m
+      # The thresholds below match the console's alerts (apps/api/app/alerts.py).
+      - alert: QueueLag
+        # max(): every worker replica reports the same queue. Events waiting out a retry
+        # backoff are not counted: only ready events that no worker has picked up.
+        expr: max(pulsequeue_queue_lag_seconds) > 30
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "Ready events have waited {{ $value | humanizeDuration }} for a worker"
+          runbook: docs/runbook.md#queue-lag-or-worker-down
+
+      - alert: DeliveryErrorRate
+        # At least 20 attempts a minute, so one failure on a quiet event type does not page.
+        expr: |
+          sum by (event_type) (rate(pulsequeue_worker_events_total{outcome!="processed"}[1m]))
+            / sum by (event_type) (rate(pulsequeue_worker_events_total[1m])) > 0.05
+          and sum by (event_type) (rate(pulsequeue_worker_events_total[1m])) * 60 >= 20
+        for: 30s
         labels: { severity: warning }
         annotations:
-          summary: "The oldest pending event has waited {{ $value | humanizeDuration }}"
-          runbook: docs/runbook.md#queue-backlog-or-worker-down
+          summary: "{{ $value | humanizePercentage }} of {{ $labels.event_type }} deliveries are failing"
+          runbook: docs/runbook.md#delivery-errors
 
-      - alert: EventsFailing
-        expr: sum(increase(pulsequeue_worker_events_total{outcome="failed"}[15m])) > 0
+      - alert: LatencySLOBreach
+        # Each event type has its own objective, exported by the worker.
+        expr: |
+          histogram_quantile(0.95,
+            sum by (event_type, le) (rate(pulsequeue_worker_event_duration_seconds_bucket[1m])))
+          > on (event_type) max by (event_type) (pulsequeue_delivery_slo_seconds)
+          and on (event_type)
+            sum by (event_type) (rate(pulsequeue_worker_event_duration_seconds_count[1m])) * 60 >= 20
+        for: 30s
         labels: { severity: warning }
         annotations:
-          summary: "Events that exhausted their retries in 15 minutes: {{ $value | humanize }}"
-          runbook: docs/runbook.md#events-failing
+          summary: "{{ $labels.event_type }} p95 delivery latency is {{ $value | humanizeDuration }}"
+          runbook: docs/runbook.md#latency-slo-breach
+
+      - alert: EventsDeadLettered
+        expr: sum(increase(pulsequeue_worker_events_total{outcome="failed"}[5m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Events that exhausted their retries in 5 minutes: {{ $value | humanize }}"
+          runbook: docs/runbook.md#events-dead-lettered

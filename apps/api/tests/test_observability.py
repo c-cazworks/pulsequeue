@@ -56,7 +56,7 @@ def test_counts_requests_by_route_template(client: TestClient) -> None:
 def test_database_outage_counts_as_503(client: TestClient, pool: FakePool) -> None:
     pool.error = ConnectionRefusedError()
     before = requests("/api/events", "201", "POST") + requests("/api/events", "503", "POST")
-    client.post("/api/events", json={"source": "s", "metric": "m", "value": 1})
+    client.post("/api/events", json={"event_type": "inventory.reserve"})
     assert requests("/api/events", "503", "POST") == before + 1
 
 
@@ -108,38 +108,24 @@ def test_json_log_includes_exception() -> None:
     assert "ValueError: boom" in json.loads(JsonFormatter().format(record))["exception"]
 
 
-class StatsPool:
-    """Serves rows in order, then stops the loop once only one is left."""
-
-    def __init__(self, rows: list[object], stop: asyncio.Event) -> None:
-        self.rows, self.stop = rows, stop
-
-    async def fetchrow(self, _query: str) -> object:
-        row = self.rows.pop(0)
-        if len(self.rows) == 1:
-            self.stop.set()
-        if isinstance(row, Exception):
-            raise row
-        return row
-
-
-def gauge(name: str) -> float | None:
-    return REGISTRY.get_sample_value(name)
-
-
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio"])
-async def test_queue_stats_survive_a_failed_sample(
+async def test_maintenance_survives_a_failed_tick(
     anyio_backend: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(worker, "QUEUE_STATS_SECONDS", 0.01)
+    monkeypatch.setattr(worker, "MAINTENANCE_SECONDS", 0.01)
     stop = asyncio.Event()
-    good = {"pending": 3, "failed": 1, "oldest_age": 42.5}
-    pool = StatsPool([ConnectionRefusedError(), good, good], stop)
-    await asyncio.wait_for(worker.report_queue(pool, stop), 1)  # type: ignore[arg-type]
-    assert gauge("pulsequeue_queue_pending") == 3
-    assert gauge("pulsequeue_queue_failed") == 1
-    assert gauge("pulsequeue_queue_oldest_pending_age_seconds") == 42.5
+    ticks: list[int] = []
+
+    async def flaky(_pool: object, count: int) -> None:
+        ticks.append(count)
+        if count == 0:
+            raise ConnectionRefusedError
+        stop.set()
+
+    monkeypatch.setattr(worker, "tick", flaky)
+    await asyncio.wait_for(worker.maintain(None, stop), 1)  # type: ignore[arg-type]
+    assert ticks == [0, 1]
 
 
 def test_json_log_drops_uvicorn_color_message() -> None:
