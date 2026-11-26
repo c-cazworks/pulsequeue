@@ -34,3 +34,7 @@ output "allowed_cidrs" {
 output "ecr_registry" {
   value = split("/", module.ecr.repository_urls["${var.name}/api"])[0]
 }
+
+output "dashboard_url" {
+  value = module.monitoring.dashboard_url
+}

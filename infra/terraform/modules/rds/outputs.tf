@@ -6,3 +6,7 @@ output "secret_arn" {
   description = "Secrets Manager secret holding the username and password."
   value       = aws_db_instance.this.master_user_secret[0].secret_arn
 }
+
+output "identifier" {
+  value = aws_db_instance.this.identifier
+}

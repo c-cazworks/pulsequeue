@@ -10,9 +10,19 @@ import signal
 from collections.abc import Awaitable, Callable
 
 import asyncpg
+from prometheus_client import start_http_server
 
 from app import heartbeat
 from app.db import close_pool, create_pool
+from app.observability import (
+    QUEUE_FAILED,
+    QUEUE_OLDEST_AGE,
+    QUEUE_PENDING,
+    WORKER_EVENT_DURATION,
+    WORKER_EVENTS,
+    WORKER_LAST_POLL,
+    configure_logging,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +33,8 @@ MAX_BACKOFF_SECONDS = 60
 HANDLER_TIMEOUT_SECONDS = 10.0
 # Bounds the SIGTERM drain: 20s + 5s pool close stays under the 30s grace period.
 ITERATION_TIMEOUT_SECONDS = 20.0
+METRICS_PORT = 9100
+QUEUE_STATS_SECONDS = 15.0
 
 CLAIM_SQL = """
     SELECT id, value, threshold, attempts
@@ -44,6 +56,15 @@ RETRY_SQL = """
     WHERE id = $1
 """
 
+QUEUE_STATS_SQL = """
+    SELECT count(*) FILTER (WHERE status = 'pending') AS pending,
+           count(*) FILTER (WHERE status = 'failed') AS failed,
+           coalesce(
+               extract(epoch FROM now() - min(created_at) FILTER (WHERE status = 'pending')), 0
+           ) AS oldest_age
+    FROM events
+"""
+
 Handler = Callable[[asyncpg.Record], Awaitable[bool]]
 
 
@@ -60,10 +81,12 @@ async def process_one(pool: asyncpg.Pool, handler: Handler = evaluate) -> bool:
             return False
         attempts = event["attempts"] + 1
         try:
-            async with asyncio.timeout(HANDLER_TIMEOUT_SECONDS):
-                breached = await handler(event)
+            with WORKER_EVENT_DURATION.time():
+                async with asyncio.timeout(HANDLER_TIMEOUT_SECONDS):
+                    breached = await handler(event)
         except Exception as exc:
             status = "failed" if attempts >= MAX_ATTEMPTS else "pending"
+            WORKER_EVENTS.labels("failed" if status == "failed" else "retried").inc()
             backoff = min(2**attempts, MAX_BACKOFF_SECONDS)
             logger.exception("event %s attempt %s failed -> %s", event["id"], attempts, status)
             await conn.execute(
@@ -71,13 +94,33 @@ async def process_one(pool: asyncpg.Pool, handler: Handler = evaluate) -> bool:
             )
         else:
             await conn.execute(DONE_SQL, event["id"], breached, attempts)
+            WORKER_EVENTS.labels("processed").inc()
         return True
+
+
+async def report_queue(pool: asyncpg.Pool, stop: asyncio.Event) -> None:
+    """Publish queue depth and age. Failures only delay the next sample."""
+    while not stop.is_set():
+        try:
+            async with asyncio.timeout(5):
+                row = await pool.fetchrow(QUEUE_STATS_SQL)
+            QUEUE_PENDING.set(row["pending"])
+            QUEUE_FAILED.set(row["failed"])
+            QUEUE_OLDEST_AGE.set(row["oldest_age"])
+        except Exception as exc:
+            logger.warning("queue stats failed: %r", exc)
+        try:
+            async with asyncio.timeout(QUEUE_STATS_SECONDS):
+                await stop.wait()
+        except TimeoutError:
+            pass
 
 
 async def run(pool: asyncpg.Pool, stop: asyncio.Event) -> None:
     """Poll until `stop` is set. The in-flight event always finishes (or rolls back) first."""
     while not stop.is_set():
         heartbeat.touch()  # also during DB outages: restarting the pod would not fix those
+        WORKER_LAST_POLL.set_to_current_time()
         delay = POLL_SECONDS
         try:
             async with asyncio.timeout(ITERATION_TIMEOUT_SECONDS):
@@ -94,19 +137,24 @@ async def run(pool: asyncpg.Pool, stop: asyncio.Event) -> None:
 
 
 async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
+    start_http_server(METRICS_PORT)  # a daemon thread; dies with the process
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     # signal.signal rather than loop.add_signal_handler: the latter is missing on Windows.
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop.set))
 
-    pool = await create_pool(max_size=1)
+    # One connection for events, one for queue stats, so neither waits on the other.
+    pool = await create_pool(max_size=2)
     logger.info("worker started")
+    stats = asyncio.create_task(report_queue(pool, stop))
     try:
         await run(pool, stop)
         logger.info("drained, shutting down")
     finally:
+        stats.cancel()
+        await asyncio.gather(stats, return_exceptions=True)
         await close_pool(pool)
 
 

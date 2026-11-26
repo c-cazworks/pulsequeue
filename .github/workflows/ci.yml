@@ -81,6 +81,7 @@ jobs:
         with: { version: v4.3.2 }
       - run: terraform -chdir=infra/terraform init -backend=false -input=false
       - run: make validate-infra
+      - run: make test-alerts
       - run: terraform -chdir=infra/terraform test # mocked; needs no credentials
       - name: Render the AWS manifests
         run: >-

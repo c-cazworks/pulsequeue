@@ -40,3 +40,11 @@ module "rds" {
   subnet_ids               = module.vpc.private_subnet_ids
   client_security_group_id = module.eks.cluster_security_group_id
 }
+
+module "monitoring" {
+  source = "./modules/monitoring"
+
+  name           = var.name
+  db_instance_id = module.rds.identifier
+  alert_email    = var.alert_email
+}

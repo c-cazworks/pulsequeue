@@ -1,4 +1,4 @@
-.PHONY: help up down logs test lint validate-infra helm-lint tf-init tf-plan tf-apply check-cluster deploy k8s-cleanup tf-destroy
+.PHONY: help up down logs test lint validate-infra test-alerts helm-lint tf-init tf-plan tf-apply check-cluster deploy k8s-cleanup tf-destroy
 
 TF_DIR   := infra/terraform
 HELM_DIR := deploy/helm
@@ -37,6 +37,14 @@ validate-infra: ## Validate Terraform formatting/syntax and lint Helm chart
 	terraform -chdir=$(TF_DIR) fmt -check -recursive
 	terraform -chdir=$(TF_DIR) validate
 	helm lint $(HELM_DIR) -f $(HELM_DIR)/values.yaml
+
+# Same image as docker-compose.yml. MSYS_NO_PATHCONV stops Git Bash rewriting /rules on Windows.
+PROMETHEUS_IMAGE := prom/prometheus:v3.16.0
+PROMTOOL := MSYS_NO_PATHCONV=1 docker run --rm -v "$(CURDIR)/deploy/observability:/rules:ro" -w /rules --entrypoint promtool $(PROMETHEUS_IMAGE)
+
+test-alerts: ## Check the Prometheus config and unit-test its alert rules (needs Docker)
+	$(PROMTOOL) check config prometheus.yml
+	$(PROMTOOL) test rules alerts.test.yml
 
 # --- AWS & Kubernetes Lifecycle (Slices 2–4) ---
 tf-init: ## Initialize Terraform backend and providers
