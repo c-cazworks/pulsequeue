@@ -1,0 +1,84 @@
+# promtool test rules alerts.test.yml
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: healthy system raises nothing
+    interval: 1m
+    input_series:
+      - { series: 'up{job="api"}', values: "1x30" }
+      - { series: 'up{job="worker"}', values: "1x30" }
+      - { series: 'pulsequeue_http_requests_total{status="202"}', values: "0+60x30" }
+      - { series: 'pulsequeue_http_requests_total{status="503"}', values: "0+1x30" }
+      - { series: 'pulsequeue_queue_oldest_pending_age_seconds', values: "5x30" }
+      - { series: 'pulsequeue_worker_events_total{outcome="failed"}', values: "0x30" }
+    alert_rule_test:
+      - { eval_time: 30m, alertname: ApiHighErrorRate, exp_alerts: [] }
+      - { eval_time: 30m, alertname: ApiDown, exp_alerts: [] }
+      - { eval_time: 30m, alertname: WorkerDown, exp_alerts: [] }
+      - { eval_time: 30m, alertname: QueueBacklog, exp_alerts: [] }
+      - { eval_time: 30m, alertname: EventsFailing, exp_alerts: [] }
+
+  - name: error rate above 5% with real traffic
+    interval: 1m
+    input_series:
+      - { series: 'pulsequeue_http_requests_total{status="202"}', values: "0+60x20" }
+      - { series: 'pulsequeue_http_requests_total{status="503"}', values: "0+10x20" }
+    alert_rule_test:
+      - { eval_time: 4m, alertname: ApiHighErrorRate, exp_alerts: [] }
+      - eval_time: 15m
+        alertname: ApiHighErrorRate
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: 14.29% of API requests are failing
+              runbook: docs/runbook.md#api-errors-or-api-down
+
+  - name: one failure on an idle system does not page
+    interval: 1m
+    input_series:
+      - { series: 'pulsequeue_http_requests_total{status="503"}', values: "0 1 1 1 1 1 1 1 1 1 1" }
+    alert_rule_test:
+      - { eval_time: 10m, alertname: ApiHighErrorRate, exp_alerts: [] }
+
+  - name: missing worker is noticed
+    interval: 1m
+    input_series:
+      - { series: 'up{job="api"}', values: "1x10" }
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WorkerDown
+        exp_alerts:
+          - exp_labels: { severity: critical, job: worker }
+            exp_annotations:
+              summary: No worker is answering scrapes
+              runbook: docs/runbook.md#queue-backlog-or-worker-down
+
+  - name: backlog uses the oldest age across replicas
+    interval: 1m
+    input_series:
+      - { series: 'pulsequeue_queue_oldest_pending_age_seconds{instance="a"}', values: "0+60x10" }
+      - { series: 'pulsequeue_queue_oldest_pending_age_seconds{instance="b"}', values: "0+60x10" }
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: QueueBacklog
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: The oldest pending event has waited 10m 0s
+              runbook: docs/runbook.md#queue-backlog-or-worker-down
+
+  - name: an exhausted event raises EventsFailing
+    interval: 1m
+    input_series:
+      - { series: 'pulsequeue_worker_events_total{outcome="failed"}', values: "0 0 1 1 1" }
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: EventsFailing
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Events that exhausted their retries in 15 minutes: 1"
+              runbook: docs/runbook.md#events-failing

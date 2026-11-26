@@ -1,5 +1,6 @@
 # pulsequeue
-a small React web dashboard backed by a Python/Go API + background worker and PostgreSQL, deployed on AWS EKS via Terraform and GitHub Actions + GitOps/Helm.
+A small telemetry and alerting service: a React dashboard, a Python API and background worker, and
+PostgreSQL, deployed to AWS EKS with Terraform, Helm and GitHub Actions.
 
 ## Running a demo
 
@@ -22,6 +23,17 @@ npm.cmd ci --prefix apps/web
 | Start | `make up`, then open http://localhost:8080 |
 | Stop, keep data | `docker compose stop` |
 | Stop, **delete data** | `make down` |
+
+`make up` also starts monitoring, on this machine only:
+
+| | URL |
+|---|---|
+| Grafana dashboard (no login) | http://localhost:3000 |
+| Prometheus, including alerts | http://localhost:9090/alerts |
+| API metrics | http://localhost:8000/metrics |
+
+What each alert means and what to do about it: [docs/runbook.md](docs/runbook.md). Design and
+trade-offs: [docs/architecture.md](docs/architecture.md).
 
 ### Option B: AWS (uses Free plan credits)
 
@@ -78,6 +90,11 @@ make tf-init
    It prints the dashboard's URL. Only the addresses in `api_allowed_cidrs` can open it. It is plain
    HTTP, because TLS needs a domain.
 
+6. Monitoring: CloudWatch alarms watch the ALB and the database. To get them by email, set
+   `alert_email` in `terraform.tfvars` before applying, then click the confirmation link AWS sends.
+   The CloudWatch dashboard's address is printed by
+   `terraform -chdir=infra/terraform output dashboard_url`.
+
 #### Shut down
 
 Do this after every demo. Stopping pods is not enough: the cluster, NAT gateway, nodes and database
@@ -124,6 +141,7 @@ $env:PULSEQUEUE_TEST_DB = "1"; $env:PGHOST = "127.0.0.1"
 $env:PGUSER = "<POSTGRES_USER>"; $env:PGDATABASE = "<POSTGRES_DB>"; $env:PGPASSWORD = '<POSTGRES_PASSWORD>'
 make test
 terraform -chdir=infra/terraform test     # mocked; needs no AWS account
+make test-alerts                          # Prometheus alert rules; needs Docker
 ```
 
 Use the values from `.env`. Without them, the database tests are skipped.

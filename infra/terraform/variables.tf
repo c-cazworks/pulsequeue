@@ -46,3 +46,14 @@ variable "node_instance_types" {
     error_message = "Use t3.small, c7i-flex.large or m7i-flex.large; the Free plan rejects other x86 types."
   }
 }
+
+variable "alert_email" {
+  description = "Optional address for alarm emails; set it in terraform.tfvars, which git ignores."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.alert_email == null || can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.alert_email))
+    error_message = "alert_email must be an email address."
+  }
+}

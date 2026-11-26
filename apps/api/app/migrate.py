@@ -5,6 +5,7 @@ from pathlib import Path
 import asyncpg
 
 from app.db import password_source
+from app.observability import configure_logging
 
 logger = logging.getLogger(__name__)
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
@@ -18,7 +19,7 @@ async def apply_schema(conn: asyncpg.Connection) -> None:
 
 
 async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     conn = await asyncpg.connect(timeout=10, command_timeout=60, password=password_source())
     try:
         await apply_schema(conn)

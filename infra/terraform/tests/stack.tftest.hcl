@@ -16,6 +16,10 @@ mock_provider "aws" {
     defaults = { arn = "arn:aws:iam::123456789012:policy/mock" }
   }
 
+  mock_resource "aws_sns_topic" {
+    defaults = { arn = "arn:aws:sns:us-east-2:123456789012:pulsequeue-alerts" }
+  }
+
   mock_resource "aws_launch_template" {
     defaults = { id = "lt-0123456789abcdef0", latest_version = 1 }
   }
@@ -67,6 +71,47 @@ run "load_balancer_controller_policy_fits_iam_limit" {
     condition     = length(jsonencode(jsondecode(aws_iam_policy.load_balancer_controller.policy))) <= 6144
     error_message = "IAM managed policies are limited to 6144 characters."
   }
+}
+
+run "alarms_notify_and_tolerate_a_missing_alb" {
+  assert {
+    condition = alltrue([
+      for a in concat(values(module.monitoring.alb_alarms), values(module.monitoring.rds_alarms)) :
+      a.alarm_actions == toset([module.monitoring.alerts_topic_arn])
+    ])
+    error_message = "Every alarm must notify the alerts topic."
+  }
+
+  assert {
+    condition     = alltrue([for a in values(module.monitoring.alb_alarms) : a.treat_missing_data == "notBreaching"])
+    error_message = "Before the app is deployed there is no ALB; that must not alarm."
+  }
+
+  assert {
+    condition     = length(module.monitoring.email_subscriptions) == 0
+    error_message = "No email subscription unless alert_email is set."
+  }
+}
+
+run "alert_email_subscribes" {
+  variables {
+    alert_email = "alerts@example.com"
+  }
+
+  assert {
+    condition     = one(module.monitoring.email_subscriptions).endpoint == "alerts@example.com"
+    error_message = "alert_email must create an email subscription."
+  }
+}
+
+run "rejects_invalid_alert_email" {
+  command = plan
+
+  variables {
+    alert_email = "not-an-email"
+  }
+
+  expect_failures = [var.alert_email]
 }
 
 run "rds_is_private_and_disposable" {

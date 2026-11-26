@@ -29,6 +29,8 @@ spec:
           command: ["python", "-m", "app.worker"]
           env:
             {{- include "pq.databaseEnv" . | nindent 12 }}
+          ports:
+            - { name: metrics, containerPort: 9100 } # kubectl port-forward; nothing scrapes it on EKS
           # No readiness probe: nothing sends it traffic.
           startupProbe:
             exec: { command: ["python", "-m", "app.heartbeat"] }

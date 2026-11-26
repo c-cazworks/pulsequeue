@@ -1,0 +1,57 @@
+# Each alert names its runbook section in docs/runbook.md. Tested by alerts.test.yml.
+groups:
+  - name: pulsequeue
+    rules:
+      - alert: ApiDown
+        expr: up{job="api"} == 0 or absent(up{job="api"})
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: The API is not answering scrapes
+          runbook: docs/runbook.md#api-errors-or-api-down
+
+      - alert: ApiHighErrorRate
+        # The traffic floor stops one failed request on an idle system from paging.
+        expr: |
+          sum(rate(pulsequeue_http_requests_total{status=~"5.."}[5m]))
+            / sum(rate(pulsequeue_http_requests_total[5m])) > 0.05
+          and sum(rate(pulsequeue_http_requests_total[5m])) > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of API requests are failing"
+          runbook: docs/runbook.md#api-errors-or-api-down
+
+      - alert: ApiSlow
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(pulsequeue_http_request_duration_seconds_bucket[5m]))) > 0.5
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "API p95 latency is {{ $value | humanizeDuration }}"
+          runbook: docs/runbook.md#api-slow
+
+      - alert: WorkerDown
+        expr: up{job="worker"} == 0 or absent(up{job="worker"})
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: No worker is answering scrapes
+          runbook: docs/runbook.md#queue-backlog-or-worker-down
+
+      - alert: QueueBacklog
+        # max(): every worker replica reports the same queue.
+        expr: max(pulsequeue_queue_oldest_pending_age_seconds) > 120
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "The oldest pending event has waited {{ $value | humanizeDuration }}"
+          runbook: docs/runbook.md#queue-backlog-or-worker-down
+
+      - alert: EventsFailing
+        expr: sum(increase(pulsequeue_worker_events_total{outcome="failed"}[15m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Events that exhausted their retries in 15 minutes: {{ $value | humanize }}"
+          runbook: docs/runbook.md#events-failing

@@ -1,6 +1,166 @@
 # Runbook
 
-Start-up and shutdown steps are in the [README](../README.md). Failure runbooks arrive with Slice 4.
+Start-up and shutdown steps are in the [README](../README.md). Design reasons are in
+[architecture.md](architecture.md).
+
+Each alert links to a section here. Local alerts are Prometheus rules in
+`deploy/observability/alerts.yml`, shown at http://localhost:9090/alerts. AWS alarms are CloudWatch
+alarms in `infra/terraform/modules/monitoring`, sent to the SNS topic `pulsequeue-alerts`.
+
+**Where to look**
+
+| | Local (Docker Compose) | EKS |
+|---|---|---|
+| Dashboard | Grafana: http://localhost:3000 | CloudWatch: `terraform -chdir=infra/terraform output dashboard_url` |
+| Logs (JSON) | `docker compose logs -f api worker` | `kubectl -n pulsequeue logs -l app.kubernetes.io/component=api --tail=100` |
+| App metrics | Prometheus: http://localhost:9090 | `kubectl -n pulsequeue port-forward deploy/pulsequeue-worker 9100`, then http://localhost:9100 |
+| Pods and probes | `docker compose ps` | `kubectl -n pulsequeue get pods,hpa` and `kubectl -n pulsequeue get events --sort-by=.lastTimestamp` |
+
+Filter JSON logs with PowerShell, for example to show only failures:
+
+```powershell
+docker compose logs --no-log-prefix api | ConvertFrom-Json | Where-Object { $_.status -ge 500 }
+```
+
+## API errors or API down
+
+Alerts: `ApiDown`, `ApiHighErrorRate` (local); `pulsequeue-alb-target-5xx` (AWS).
+
+1. **Is the database reachable?** While it is not, the API answers `503 database unavailable` and
+   `/readyz` fails, so pods leave the load balancer instead of restarting.
+   - Local: `docker compose ps db`, then `curl http://localhost:8000/readyz`.
+   - EKS: `kubectl -n pulsequeue get pods`. Ready `0/1` on every API pod points at the database.
+2. **On EKS, can pods read the password?** Look for `cannot read the database secret` in the API
+   logs.
+   - `AccessDenied`: the Pod Identity association or the `pulsequeue-app` policy is missing. Check
+     that `terraform -chdir=infra/terraform plan` shows no changes.
+   - Timeouts: the NAT gateway or Secrets Manager is unreachable.
+3. **Is it the code?** Errors on one route only, and logs with an `exception` field, point at a bad
+   release. Roll back with `helm -n pulsequeue rollback pulsequeue`, then fix forward.
+4. **Crash loops?** Run `kubectl -n pulsequeue describe pod <pod>`. `OOMKilled` means raising
+   `api.resources.limits.memory`.
+
+## API slow
+
+Alerts: `ApiSlow` (p95 above 500 ms, local); `pulsequeue-alb-slow` (average above 500 ms, AWS).
+
+1. Find the slow route on the Grafana latency panel, or in the logs' `duration_ms` field.
+2. Check the database first: `pulsequeue-rds-cpu`, and CPU and connections on the CloudWatch
+   dashboard. `GET /api/events` and `/api/status` scan the `events` table, which grows without limit.
+3. On EKS, check CPU with `kubectl -n pulsequeue top pods`. If the API HPA is at its maximum (4),
+   the nodes may be full: `kubectl get pods -A --field-selector=status.phase=Pending`. Two
+   `t3.small` nodes fit 22 pods in total.
+
+## Queue backlog or worker down
+
+Alerts: `WorkerDown`, `QueueBacklog` (oldest pending event older than 2 minutes, for 5 minutes).
+
+1. **Is a worker running?**
+   - Local: `docker compose ps worker`.
+   - EKS: `kubectl -n pulsequeue get pods -l app.kubernetes.io/component=worker`. A restart loop
+     with a failing liveness probe means the poll loop is stuck: the heartbeat goes stale after 60 s.
+2. **Is it polling?** The Grafana panel "Seconds since each worker polled" should stay near 1 s.
+3. **Is it keeping up?** Compare "Events finished per second" with the API's `POST /api/events`
+   rate. If it stays lower, add a replica: `--set worker.replicas=3` on EKS, or
+   `docker compose up -d --scale worker=2` locally. Claims use `SKIP LOCKED`, so replicas never
+   process the same event.
+4. **Is the database slow?** A slow claim query slows every worker. See
+   [Database under pressure](#database-under-pressure).
+
+A restarted worker can briefly report an old event's age before it drains the queue. That only
+fires `QueueBacklog` if it lasts 5 minutes.
+
+## Events failing
+
+Alert: `EventsFailing` (an event used all 5 attempts).
+
+1. Find them and the reason (locally, open a shell with `docker compose exec db psql -U pulsequeue`):
+
+   ```sql
+   SELECT id, source, metric, attempts, last_error FROM events
+   WHERE status = 'failed' ORDER BY id DESC LIMIT 20;
+   ```
+
+2. Worker logs show each failed attempt with its stack trace, in the `exception` field.
+3. After fixing the cause, requeue them:
+
+   ```sql
+   UPDATE events SET status = 'pending', attempts = 0, available_at = now() WHERE status = 'failed';
+   ```
+
+## ALB has no healthy targets
+
+Alarms: `pulsequeue-alb-alb-5xx`, `pulsequeue-alb-unhealthy-targets` (AWS).
+
+The ALB answers `502` or `503` itself when no `web` pod passes its health check (`/readyz` on port
+8080). `web` readiness does not depend on the API, so the cause is the web pods or the controller.
+
+1. `kubectl -n pulsequeue get pods -l app.kubernetes.io/component=web`, and their events.
+2. Controller errors: `kubectl -n kube-system logs deploy/aws-load-balancer-controller --tail=50`.
+   `AccessDenied` there means its Pod Identity association or policy is missing.
+3. The page does not load at all, with no 5xx? Your IP has probably changed: see
+   [Your IP changed](#your-ip-changed).
+
+## Database under pressure
+
+Alarms: `pulsequeue-rds-cpu`, `pulsequeue-rds-connections`, `pulsequeue-rds-storage` (AWS).
+
+- **Connections:** the app needs at most about 44 (4 API pods × 10, plus 2 workers × 2). More
+  points at leaked connections, or another client.
+- **Storage:** 20 GiB holds a lot of events. Delete old processed ones:
+  `DELETE FROM events WHERE status = 'processed' AND processed_at < now() - interval '7 days';`
+- **CPU:** usually the unbounded `events` scans. Check `pg_stat_statements` for slow queries.
+
+## A deploy failed
+
+`make deploy` uses `--rollback-on-failure`, so a failed release rolls itself back.
+
+1. `helm -n pulsequeue history pulsequeue` shows what happened.
+2. **Migration failed:** the pre-upgrade hook stops the rollout before any pod changes, so the old
+   version keeps serving. The rollback removes the failed Job; to read its logs, run the
+   `helm upgrade` from `scripts/deploy.sh` without `--rollback-on-failure`, then
+   `kubectl -n pulsequeue logs job/pulsequeue-migrate`.
+3. **Pods never became ready:** `kubectl -n pulsequeue get events --sort-by=.lastTimestamp`.
+   `ImagePullBackOff` means the commit was never published: check that its `main` CI run finished.
+4. **Image copy failed:** run `gh auth refresh -s read:packages`, and check `aws login` is current.
+
+## Teardown is stuck or failed
+
+- **"Refusing: kubectl context is ...":** run the `aws eks update-kubeconfig` command it prints.
+- **Stopped while deleting the ingress:** the controller could not delete the ALB. Do not skip this
+  step: the ALB would be orphaned and the VPC could not be deleted. Find out why with
+  `kubectl -n kube-system logs deploy/aws-load-balancer-controller`. If the controller is gone,
+  delete the ALB and its target groups in the EC2 console, remove the ingress finalizer, and run
+  `make tf-destroy` again:
+
+  ```powershell
+  kubectl -n pulsequeue patch ingress pulsequeue --type=merge -p '{\"metadata\":{\"finalizers\":null}}'
+  ```
+
+- **`DependencyViolation` deleting the VPC or a subnet:** something outside Terraform still has a
+  network interface there, usually a leftover load balancer. Look in the EC2 console under Network
+  Interfaces, filtered by the VPC.
+- Afterwards, confirm nothing is left with the commands in the README.
+
+## Your IP changed
+
+The EKS API and the ALB only accept `api_allowed_cidrs`, so `kubectl` times out and the dashboard
+does not load.
+
+1. Put the new IP in `infra/terraform/terraform.tfvars`.
+2. Run `make tf-plan` and `make tf-apply`. This updates the EKS endpoint.
+3. Run `make deploy`, which updates the ALB's allowlist.
+
+## AWS sign-in expired
+
+Terraform, `kubectl` and `make deploy` fail with expired or missing credentials. Run
+`aws login --profile pulsequeue` and retry. The cluster keeps running meanwhile; nothing is lost.
+
+## Access denied on something that worked before
+
+Check spend status in AWS Settings > Billing: a spend limit pauses the project when it is reached.
+Run `aws freetier get-account-plan-state` to confirm the plan is still `FREE` with credits left. Do
+not upgrade the plan or activate advanced features to work around it.
 
 ## AWS rules
 
